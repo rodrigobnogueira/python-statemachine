@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
 from functools import reduce
@@ -5,6 +7,7 @@ from operator import attrgetter
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
+from typing import Generator
 from typing import Iterable
 from typing import List
 from typing import Set
@@ -25,6 +28,23 @@ if TYPE_CHECKING:
     from .callbacks import CallbackSpec
     from .callbacks import CallbackSpecList
     from .callbacks import CallbacksRegistry
+
+_strict_signatures: ContextVar[bool] = ContextVar("_strict_signatures", default=True)
+
+
+@contextmanager
+def skip_signature_validation() -> Generator[None, None, None]:
+    """Context manager to disable signature validation for performance-critical code.
+
+    When inside this context, callbacks are invoked directly with **kwargs
+    without argument binding. This improves performance in hot paths but
+    requires that all callbacks accept **kwargs.
+    """
+    token = _strict_signatures.set(False)
+    try:
+        yield
+    finally:
+        _strict_signatures.reset(token)
 
 
 @dataclass
@@ -189,17 +209,20 @@ class Listeners:
 def callable_method(a_callable) -> Callable:
     sig = SignatureAdapter.from_callable(a_callable)
     sig_bind_expected = sig.bind_expected
-
     metadata_to_copy = a_callable.func if isinstance(a_callable, partial) else a_callable
 
     if sig.is_coroutine:
 
         async def signature_adapter(*args: Any, **kwargs: Any) -> Any:
+            if not _strict_signatures.get():
+                return await a_callable(**kwargs)
             ba = sig_bind_expected(*args, **kwargs)
             return await a_callable(*ba.args, **ba.kwargs)
     else:
 
         def signature_adapter(*args: Any, **kwargs: Any) -> Any:  # type: ignore[misc]
+            if not _strict_signatures.get():
+                return a_callable(**kwargs)
             ba = sig_bind_expected(*args, **kwargs)
             return a_callable(*ba.args, **ba.kwargs)
 
@@ -208,6 +231,7 @@ def callable_method(a_callable) -> Callable:
     signature_adapter.is_coroutine = sig.is_coroutine  # type: ignore[attr-defined]
 
     return signature_adapter
+
 
 
 def attr_method(attribute, obj) -> Callable:

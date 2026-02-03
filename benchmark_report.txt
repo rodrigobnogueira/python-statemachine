@@ -1,0 +1,88 @@
+============================================================
+SIGNATURE ADAPTER PERFORMANCE BENCHMARK REPORT
+Issue #548: signature_adapter causes overhead in hot paths
+============================================================
+
+Date: 2026-02-02
+Python: 3.14.2
+Platform: Darwin (macOS)
+pytest-benchmark: 5.2.3
+
+============================================================
+BASELINE RESULTS (Before Optimization)
+============================================================
+
+Summary: Current implementation calls bind_expected() on every
+callback invocation, causing 30-50% overhead in hot paths.
+
+Test Results:
+-------------
+
+| Test Case                        | Mean (μs) | OPS (Kops/s) | Description                     |
+|----------------------------------|-----------|--------------|----------------------------------|
+| test_bench_cyclic_transitions    |    24.95  |     40.08    | Simple state change, no callbacks|
+| test_bench_conditions            |    82.88  |     12.07    | Single condition + callback      |
+| test_bench_varkwargs_callbacks   |    93.68  |     10.68    | Callbacks with *args, **kwargs   |
+| test_bench_no_arg_callbacks      |   104.70  |      9.55    | Callbacks with no args           |
+| test_bench_many_callbacks        |   106.55  |      9.38    | Multiple callbacks (before/on/after) |
+| test_bench_kwargs_callbacks      |   108.24  |      9.24    | Callbacks with specific kwargs   |
+| test_bench_high_frequency (ms)   |  2438.50  |    410.08 ops| 100 round-trips per iteration    |
+
+Key Observations:
+- Simple cyclic transitions (no callbacks): ~25μs per transition pair
+- With callbacks: ~80-110μs per transition (3-4x slower)
+- The overhead comes from signature binding on every invocation
+
+============================================================
+POST-OPTIMIZATION RESULTS
+============================================================
+
+Implementation: Added skip_signature_validation() context manager in
+statemachine/dispatcher.py that bypasses signature binding.
+
+When _strict_signatures is False, callbacks receive **kwargs directly
+without the overhead of inspect.Signature.bind().
+
+Comparative Benchmark (100 transitions per iteration):
+------------------------------------------------------
+
+| Mode           | Mean (ms) | OPS (ops/s) | Improvement |
+|----------------|-----------|-------------|-------------|
+| Baseline       |   1.7418  |    574.11   |     -       |
+| Optimized      |   1.3281  |    752.97   |   ~31%      |
+
+The optimized mode shows a ~31% improvement in performance for
+high-frequency transition scenarios.
+
+============================================================
+USAGE
+============================================================
+
+To use the optimization for performance-critical code paths:
+
+    from statemachine.dispatcher import skip_signature_validation
+    
+    sm = MyStateMachine()
+    
+    with skip_signature_validation():
+        for _ in range(1000):
+            sm.trigger_event()
+
+NOTE: Callbacks must accept **kwargs when using skip_signature_validation.
+Callbacks with specific parameter signatures may receive extra kwargs.
+
+============================================================
+CONCLUSIONS
+============================================================
+
+1. The signature_adapter's bind_expected() method introduces significant
+   overhead (~30%) in hot paths where transitions are called frequently.
+
+2. The skip_signature_validation() context manager provides an escape
+   hatch for performance-critical scenarios.
+
+3. For most use cases, the default strict mode is recommended as it
+   provides better error messages and parameter validation.
+
+4. The optimization is thread-safe using ContextVar, allowing different
+   contexts to have different signature validation settings.
